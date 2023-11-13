@@ -139,6 +139,14 @@ def get_fixed_type(yaml_type: str):
     return get_fixed_base_type(yaml_type) + "_fixed"
 
 
+@typechecked
+def get_all_keys(param_map: dict):
+    for key, value in param_map.items():
+        yield key
+        if isinstance(value, dict):
+            yield from get_all_keys(value)
+
+
 class CodeGenVariableBase:
     @typechecked
     def __init__(
@@ -434,8 +442,14 @@ class SetStackParams:
 
 class SetParameterBase:
     @typechecked
-    def __init__(self, parameter_name: str, code_gen_variable: CodeGenVariableBase):
+    def __init__(
+        self,
+        parameter_name: str,
+        params_map_parents: list,
+        code_gen_variable: CodeGenVariableBase,
+    ):
         self.parameter_name = parameter_name
+        self.params_map_parents = params_map_parents
         self.parameter_as_function = code_gen_variable.parameter_as_function_str()
         self.parameter_validations = []
 
@@ -452,6 +466,7 @@ class SetParameter(SetParameterBase):
             "parameter_name": self.parameter_name,
             "parameter_validations": str(parameter_validations_str),
             "parameter_as_function": self.parameter_as_function,
+            "mapped_params": self.params_map_parents,
         }
 
         j2_template = Template(GenerateCode.templates["set_parameter"])
@@ -463,10 +478,19 @@ class SetRuntimeParameter(SetParameterBase):
     def __str__(self):
         parameter_validations_str = "".join(str(x) for x in self.parameter_validations)
         parameter_field = get_dynamic_parameter_field(self.parameter_name)
+        mapped_param = get_dynamic_mapped_parameter(self.parameter_name)
+        parameter_map = get_dynamic_parameter_map(self.parameter_name)
+        struct_name = get_dynamic_struct_name(self.parameter_name)
+        param_struct_instance = "updated_params"
         data = {
+            "struct_name": struct_name,
             "parameter_field": parameter_field,
             "parameter_validations": str(parameter_validations_str),
             "parameter_as_function": self.parameter_as_function,
+            "param_struct_instance": param_struct_instance,
+            "parameter_field": parameter_field,
+            "parameter_map": parameter_map,
+            "mapped_param": mapped_param,
         }
 
         j2_template = Template(GenerateCode.templates["set_runtime_parameter"])
@@ -701,6 +725,7 @@ class GenerateCode:
         self.update_declare_dynamic_parameter = []
         self.remove_dynamic_parameter = []
         self.declare_parameter_sets = []
+        self.declare_dynamic_parameters_sets = []
         self.set_stack_params = []
         if language == "cpp":
             self.comments = "// auto-generated DO NOT EDIT"
@@ -728,6 +753,10 @@ class GenerateCode:
                 raise compile_error(
                     "The yaml definition must only have one root element"
                 )
+            self.params_map_parents = list()
+            for key in list(get_all_keys(doc)):
+                if is_mapped_parameter(key):
+                    self.params_map_parents.append((key.replace("__map_", "")))
             self.namespace = list(doc.keys())[0]
             self.user_validation_file = validate_header
             self.parse_dict(self.namespace, doc[self.namespace], [])
@@ -764,7 +793,9 @@ class GenerateCode:
         is_runtime_parameter = is_mapped_parameter(self.struct_tree.struct_name)
 
         if is_runtime_parameter:
-            declare_parameter_set = SetRuntimeParameter(param_name, code_gen_variable)
+            declare_parameter_set = SetRuntimeParameter(
+                param_name, self.params_map_parents, code_gen_variable
+            )
             declare_parameter = DeclareRuntimeParameter(
                 code_gen_variable, description, read_only, validations
             )
@@ -774,7 +805,9 @@ class GenerateCode:
             declare_parameter = DeclareParameter(
                 code_gen_variable, description, read_only, validations
             )
-            declare_parameter_set = SetParameter(param_name, code_gen_variable)
+            declare_parameter_set = SetParameter(
+                param_name, self.params_map_parents, code_gen_variable
+            )
             update_parameter = UpdateParameter(param_name, code_gen_variable)
 
         # set parameter
@@ -803,13 +836,16 @@ class GenerateCode:
             self.set_stack_params.append(SetStackParams(code_gen_variable.param_name))
         if is_runtime_parameter:
             self.declare_dynamic_parameters.append(declare_parameter)
-            self.update_dynamic_parameters.append(update_parameter)
+            self.declare_dynamic_parameters_sets.append(declare_parameter_set)
+            if str(update_parameter):
+                self.update_dynamic_parameters.append(update_parameter)
             self.update_declare_dynamic_parameter.append(declare_parameter)
             dynamic_update_parameter = RemoveRuntimeParameter(declare_parameter)
             self.remove_dynamic_parameter.append(dynamic_update_parameter)
         else:
             self.declare_parameters.append(declare_parameter)
-            self.update_parameters.append(update_parameter)
+            if str(update_parameter):
+                self.update_parameters.append(update_parameter)
             self.declare_parameter_sets.append(declare_parameter_set)
 
     def parse_dict(self, name, root_map, nested_name):
@@ -859,6 +895,9 @@ class GenerateCode:
             ),
             "declare_set_dynamic_params": "\n".join(
                 [str(x) for x in self.declare_dynamic_parameters]
+            ),
+            "set_dynamic_params": "\n".join(
+                [str(x) for x in self.declare_dynamic_parameters_sets]
             ),
             "update_declare_dynamic_parameters": "\n".join(
                 [str(x) for x in self.update_declare_dynamic_parameter]

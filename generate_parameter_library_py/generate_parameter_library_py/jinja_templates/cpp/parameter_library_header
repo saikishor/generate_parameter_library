@@ -119,8 +119,25 @@ struct StackParams {
     }
 
     Params get_params() const{
-      std::lock_guard<std::mutex> lock(mutex_);
-      return params_;
+      auto params = get_internal_params();
+      if(params.__stamp.seconds() == 0){
+        Params updated_params;
+        // get parameters and fill struct fields
+        rclcpp::Parameter param;
+
+{%- filter indent(width=8) %}
+{{declare_params_set}}
+{%- endfilter %}
+{% if set_dynamic_params|length %}
+{% filter indent(width=8) %}
+// set all dynamic parameters
+{{set_dynamic_params-}}
+{%- endfilter %}
+{%- endif %}
+        updated_params.__stamp = clock_.now();
+        return updated_params;
+      }
+      return params;
     }
 
     bool is_old(Params const& other) const {
@@ -139,27 +156,19 @@ struct StackParams {
       return output;
     }
 
+    [[deprecated("Calling the method is no longer needed, will be removed in the future")]]
     void refresh_dynamic_parameters() {
-      auto updated_params = get_params();
-      // TODO remove any destroyed dynamic parameters
-{%- filter indent(width=6) %}
-{{remove_dynamic_parameters}}
-{%- endfilter %}
-      // declare any new dynamic parameters
-      rclcpp::Parameter param;
-{%- filter indent(width=6) %}
-{{update_declare_dynamic_parameters}}
-{%- endfilter %}
     }
 
     rcl_interfaces::msg::SetParametersResult update(const std::vector<rclcpp::Parameter> &parameters) {
-      auto updated_params = get_params();
-
+      auto updated_params = get_internal_params();
+{% if update_params_set|length %}
       for (const auto &param: parameters) {
 {%- filter indent(width=8) %}
 {{update_params_set}}
 {%- endfilter %}
       }
+{%- endif %}
 {% if update_dynamic_parameters|length %}
       // update dynamic parameters
       for (const auto &param: parameters) {
@@ -174,26 +183,18 @@ struct StackParams {
     }
 
     void declare_params(){
-      auto updated_params = get_params();
+      Params updated_params;
       // declare all parameters and give default values to non-required ones
 {%- filter indent(width=6) %}
 {{declare_params}}
 {%- endfilter %}
-      // get parameters and fill struct fields
-      rclcpp::Parameter param;
 
-{%- filter indent(width=6) %}
-{{declare_params_set}}
-{%- endfilter %}
 {% if declare_set_dynamic_params|length %}
 {% filter indent(width=6) %}
-// declare and set all dynamic parameters
+// declare all dynamic parameters
 {{declare_set_dynamic_params}}
 {%- endfilter %}
 {%- endif %}
-
-      updated_params.__stamp = clock_.now();
-      update_interal_params(updated_params);
     }
 
     private:
@@ -202,8 +203,15 @@ struct StackParams {
         params_ = updated_params;
       }
 
+      Params get_internal_params() const{
+        std::lock_guard<std::mutex> lock(mutex_);
+        return params_;
+      }
+
       std::string prefix_;
       Params params_;
+      // for detecting if the parameter struct has been updated by update
+      rclcpp::Time latest_stamp_;
       rclcpp::Clock clock_;
       std::shared_ptr<rclcpp::node_interfaces::OnSetParametersCallbackHandle> handle_;
       std::shared_ptr<rclcpp::node_interfaces::NodeParametersInterface> parameters_interface_;
